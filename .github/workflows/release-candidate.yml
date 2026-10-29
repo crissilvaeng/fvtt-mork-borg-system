@@ -1,0 +1,63 @@
+# Publishes a release candidate (X.Y.Z-rc.N) every time a pull request is
+# merged into develop. See .github/scripts/next-rc-version.sh for how the
+# version is chosen.
+name: Release Candidate
+
+on:
+  push:
+    branches: [develop]
+
+# one release at a time, so rc numbers never collide
+concurrency:
+  group: release-candidate
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version
+        id: version
+        run: echo "version=$(.github/scripts/next-rc-version.sh)" >> "$GITHUB_OUTPUT"
+
+      # The version is only changed in the released files, nothing is committed back
+      - name: Point system.json at this release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          base="https://github.com/${GITHUB_REPOSITORY}"
+          jq --arg v "$VERSION" --arg base "$base" '
+            .version = $v
+            | .url = $base
+            | .manifest = "\($base)/releases/download/\($v)/system.json"
+            | .download = "\($base)/releases/download/\($v)/system.zip"
+          ' system.json > system.json.tmp
+          mv system.json.tmp system.json
+
+      - name: Create system.zip
+        run: >
+          zip -r system.zip
+          CHANGELOG.md LICENSE.MB3PL LICENSE.MIT how-to-use-this-system.md README.md
+          system.json template.json assets/ css/ icons/ lang/ module/ packs/ templates/ tokens/ ui/
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" system.json system.zip --clobber
+          else
+            gh release create "$VERSION" system.json system.zip \
+              --target "$GITHUB_SHA" \
+              --title "$VERSION" \
+              --prerelease \
+              --generate-notes
+          fi
